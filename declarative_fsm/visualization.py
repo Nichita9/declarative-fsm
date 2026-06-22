@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict
 import subprocess
+from pathlib import Path
 from shutil import which
+from typing import Any, Dict
+
+from PIL import Image, ImageDraw, ImageFont
 
 from .definition import parse_definition
 from .models import WorkflowDefinition
@@ -52,13 +54,11 @@ def to_dot(definition: Dict[str, Any] | WorkflowDefinition) -> str:
                 'color="#2FA36B"',
                 'penwidth=2',
             ])
-
-        if state in final_states:
+        elif state in final_states:
             attrs.extend([
-                'fillcolor="#FFF1E3"',
-                'color="#D2701F"',
+                'fillcolor="#FFE6E6"',
+                'color="#C82828"',
                 'penwidth=2',
-                'shape=doubleoctagon',
             ])
 
         attr_text = f' [{", ".join(attrs)}]' if attrs else ""
@@ -87,6 +87,7 @@ def to_dot(definition: Dict[str, Any] | WorkflowDefinition) -> str:
 
 def to_mermaid(definition: Dict[str, Any] | WorkflowDefinition) -> str:
     workflow = _as_definition(definition)
+
     lines = ["stateDiagram-v2"]
 
     for transition in _visible_transitions(workflow):
@@ -117,8 +118,165 @@ def save_mermaid(definition: Dict[str, Any] | WorkflowDefinition, path: str | Pa
     return target
 
 
+def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    font_paths = [
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\calibri.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+
+    for font_path in font_paths:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except OSError:
+            pass
+
+    return ImageFont.load_default()
+
+
+def _draw_legend_box(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    fill: tuple[int, int, int],
+    outline: tuple[int, int, int],
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+) -> None:
+    draw.rounded_rectangle(
+        (x, y, x + 70, y + 34),
+        radius=8,
+        fill=fill,
+        outline=outline,
+        width=3,
+    )
+
+    draw.text(
+        (x + 90, y + 17),
+        text,
+        fill=(35, 35, 35),
+        font=font,
+        anchor="lm",
+    )
+
+
+def _draw_legend_arrow(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+) -> None:
+    draw.line(
+        (x, y + 17, x + 75, y + 17),
+        fill=(59, 74, 90),
+        width=3,
+    )
+
+    draw.polygon(
+        [
+            (x + 75, y + 17),
+            (x + 58, y + 8),
+            (x + 58, y + 26),
+        ],
+        fill=(59, 74, 90),
+    )
+
+    draw.text(
+        (x + 100, y + 17),
+        "переход между состояниями",
+        fill=(35, 35, 35),
+        font=font,
+        anchor="lm",
+    )
+
+
+def _append_legend_to_png(path: Path) -> None:
+    image = Image.open(path).convert("RGB")
+
+    width, height = image.size
+    legend_height = 180
+    padding = 35
+
+    result = Image.new(
+        "RGB",
+        (width, height + legend_height),
+        "white",
+    )
+
+    result.paste(image, (0, 0))
+
+    draw = ImageDraw.Draw(result)
+
+    title_font = _load_font(22)
+    text_font = _load_font(17)
+
+    legend_top = height + 20
+    legend_left = padding
+    legend_right = width - padding
+    legend_bottom = height + legend_height - 20
+
+    draw.rounded_rectangle(
+        (legend_left, legend_top, legend_right, legend_bottom),
+        radius=12,
+        outline=(160, 160, 160),
+        width=2,
+    )
+
+    draw.text(
+        (legend_left + 25, legend_top + 28),
+        "Легенда:",
+        fill=(20, 20, 20),
+        font=title_font,
+        anchor="lm",
+    )
+
+    first_row_y = legend_top + 62
+    second_row_y = legend_top + 98
+
+    _draw_legend_box(
+        draw,
+        legend_left + 25,
+        first_row_y,
+        fill=(232, 247, 237),
+        outline=(47, 163, 107),
+        text="начальное состояние",
+        font=text_font,
+    )
+
+    _draw_legend_box(
+        draw,
+        legend_left + 360,
+        first_row_y,
+        fill=(245, 250, 255),
+        outline=(79, 118, 163),
+        text="промежуточное состояние",
+        font=text_font,
+    )
+
+    _draw_legend_box(
+        draw,
+        legend_left + 760,
+        first_row_y,
+        fill=(255, 230, 230),
+        outline=(200, 40, 40),
+        text="конечное состояние",
+        font=text_font,
+    )
+
+    _draw_legend_arrow(
+        draw,
+        legend_left + 25,
+        second_row_y,
+        font=text_font,
+    )
+
+    result.save(path)
+
+
 def render_png(definition: Dict[str, Any] | WorkflowDefinition, path: str | Path) -> Path:
     workflow = _as_definition(definition)
+
     target = Path(path)
 
     if target.suffix.lower() != ".png":
@@ -147,18 +305,6 @@ def render_png(definition: Dict[str, Any] | WorkflowDefinition, path: str | Path
             f"{exc.stderr or exc.stdout}"
         ) from exc
 
-    wide_path = target.with_name(f"{target.stem}_wide{target.suffix}")
-    wide_dot_path = wide_path.with_suffix(".dot")
-    wide_dot_path.write_text(to_dot(workflow), encoding="utf-8")
-
-    try:
-        subprocess.run(
-            [GRAPHVIZ_DOT, "-Tpng", str(wide_dot_path), "-o", str(wide_path)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except Exception:
-        pass
+    _append_legend_to_png(target)
 
     return target
